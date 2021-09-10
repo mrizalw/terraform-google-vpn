@@ -37,7 +37,7 @@ locals {
 
 resource "google_compute_ha_vpn_gateway" "ha_gateway" {
   count    = var.create_vpn_gateway == true ? 1 : 0
-  provider = google-beta
+  provider = google
   name     = var.name
   project  = var.project_id
   region   = var.region
@@ -45,7 +45,7 @@ resource "google_compute_ha_vpn_gateway" "ha_gateway" {
 }
 
 resource "google_compute_external_vpn_gateway" "external_gateway" {
-  provider        = google-beta
+  provider        = google
   count           = var.peer_external_gateway != null ? 1 : 0
   name            = "external-${var.name}"
   project         = var.project_id
@@ -61,7 +61,7 @@ resource "google_compute_external_vpn_gateway" "external_gateway" {
 }
 
 resource "google_compute_router" "router" {
-  provider = google-beta
+  provider = google
   count    = var.router_name == "" ? 1 : 0
   name     = "vpn-${var.name}"
   project  = var.project_id
@@ -140,6 +140,48 @@ resource "google_compute_router_peer" "bgp_peer" {
   interface = google_compute_router_interface.router_interface[each.key].name
 }
 
+resource "google_compute_router_peer" "bgp_peer" {
+  for_each        = var.external_tunnels
+  region          = var.region
+  project         = var.project_id
+  name            = "${var.name}-${each.key}"
+  router          = local.router
+  peer_ip_address = each.value.bgp_peer.address
+  peer_asn        = each.value.bgp_peer.asn
+  advertised_route_priority = (
+    each.value.bgp_peer_options == null ? var.route_priority : (
+      each.value.bgp_peer_options.route_priority == null
+      ? var.route_priority
+      : each.value.bgp_peer_options.route_priority
+    )
+  )
+  advertise_mode = (
+    each.value.bgp_peer_options == null ? null : each.value.bgp_peer_options.advertise_mode
+  )
+  advertised_groups = (
+    each.value.bgp_peer_options == null ? null : (
+      each.value.bgp_peer_options.advertise_mode != "CUSTOM"
+      ? null
+      : each.value.bgp_peer_options.advertise_groups
+    )
+  )
+  dynamic "advertised_ip_ranges" {
+    for_each = (
+      each.value.bgp_peer_options == null ? {} : (
+        each.value.bgp_peer_options.advertise_mode != "CUSTOM"
+        ? {}
+        : each.value.bgp_peer_options.advertise_ip_ranges
+      )
+    )
+    iterator = range
+    content {
+      range       = range.key
+      description = range.value
+    }
+  }
+  interface = google_compute_router_interface.router_interface_ext[each.key].name
+}
+
 resource "google_compute_router_interface" "router_interface" {
   provider   = google-beta
   for_each   = var.tunnels
@@ -151,7 +193,34 @@ resource "google_compute_router_interface" "router_interface" {
   vpn_tunnel = google_compute_vpn_tunnel.tunnels[each.key].name
 }
 
+resource "google_compute_router_interface" "router_interface_ext" {
+  provider   = google-beta
+  for_each   = var.external_tunnels
+  project    = var.project_id
+  region     = var.region
+  name       = "${var.name}-${each.key}"
+  router     = local.router
+  ip_range   = each.value.bgp_session_range == "" ? null : each.value.bgp_session_range
+  vpn_tunnel = google_compute_vpn_tunnel.external_tunnels[each.key].name
+}
+   
 resource "google_compute_vpn_tunnel" "tunnels" {
+  provider                        = google-beta
+  for_each                        = var.tunnels
+  project                         = var.project_id
+  region                          = var.region
+  name                            = "${var.name}-${each.key}"
+  router                          = local.router
+  #peer_external_gateway           = local.peer_external_gateway
+  #peer_external_gateway_interface = each.value.peer_external_gateway_interface
+  peer_gcp_gateway                = var.peer_gcp_gateway
+  vpn_gateway_interface           = each.value.vpn_gateway_interface
+  ike_version                     = each.value.ike_version
+  shared_secret                   = each.value.shared_secret == "" ? local.secret : each.value.shared_secret
+  vpn_gateway                     = local.vpn_gateway_self_link
+}
+
+resource "google_compute_vpn_tunnel" "external_tunnels" {
   provider                        = google-beta
   for_each                        = var.tunnels
   project                         = var.project_id
@@ -160,13 +229,13 @@ resource "google_compute_vpn_tunnel" "tunnels" {
   router                          = local.router
   peer_external_gateway           = local.peer_external_gateway
   peer_external_gateway_interface = each.value.peer_external_gateway_interface
-  peer_gcp_gateway                = var.peer_gcp_gateway
+  #peer_gcp_gateway                = var.peer_gcp_gateway
   vpn_gateway_interface           = each.value.vpn_gateway_interface
   ike_version                     = each.value.ike_version
   shared_secret                   = each.value.shared_secret == "" ? local.secret : each.value.shared_secret
   vpn_gateway                     = local.vpn_gateway_self_link
 }
-
+   
 resource "random_id" "secret" {
   byte_length = 8
 }
